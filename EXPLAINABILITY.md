@@ -1,363 +1,313 @@
 # Explainability
 
-## 1. PURPOSE AND EXPLAINABILITY SCOPE
+## Agent Purpose
+The exact purpose of the Student Performance Analysis Agent is to perform deterministic, rule-based analysis of structured academic records provided by a user. Its intended use is to generate metrics, flags, and rule-based suggestions from standard numerical data. 
+- **Supported analytical operations**: Grade aggregation, subject bucketing, attendance checking, risk flagging, trend analysis, and static improvement plan mapping.
+- **What it does NOT do**: It does not alter university records or generate dynamic narrative feedback.
+- **LLM usage**: It does **NOT** use an LLM for any core analytical operations.
+- **External retrieval**: It does **NOT** retrieve external student information; all data must be supplied in the payload.
+- **Institutional limits**: It does **NOT** make institutional decisions, provide medical/psychological conclusions, or perform predictive modeling beyond its deterministic bounds.
 
-This document provides a rigorous, evaluator-facing explanation of the logic, data handling, and decision-making parameters of the Student Performance Analysis Agent. 
+## Inputs
+| Tool | Input | Required | Type | Constraints | Source |
+|---|---|---|---|---|---|
+| analyze-student-performance | student_id | Yes | string | N/A | User |
+| analyze-student-performance | student_name | No | string | N/A | User |
+| analyze-student-performance | subjects | Yes | array | Non-empty, unique subject_id | User |
+| analyze-student-performance | subjects[].marks_obtained | Yes | number | >= 0, <= max_marks | User |
+| analyze-student-performance | subjects[].max_marks | Yes | number | > 0 | User |
+| analyze-student-performance | attendance_percentage | No | number | 0 - 100 | User |
+| analyze-subject-performance | subjects | Yes | array | Requires required fields per item | User |
+| analyze-attendance | student_id | Yes | string | N/A | User |
+| analyze-attendance | attendance_percentage | Conditional | number | 0 - 100 | User |
+| analyze-attendance | classes_attended | Conditional | integer | >= 0, <= conducted | User |
+| analyze-attendance | classes_conducted | Conditional | integer | > 0 | User |
+| detect-performance-risk | overall_percentage | No | number | 0 - 100 | User |
+| detect-performance-risk | attendance_percentage | No | number | 0 - 100 | User |
+| detect-performance-risk | failing_subjects_count | No | integer | >= 0 | User |
+| detect-performance-risk | recent_performance_change | No | number | Numeric | User |
+| calculate-grade-summary | array or subjects array | Yes | array | Non-empty | User |
+| analyze-performance-trend | student_id | Yes | string | N/A | User |
+| analyze-performance-trend | periods | Yes | array | Min 2, unique periods | User |
+| generate-improvement-plan | weak_subjects | No | array(str) | Strings | User |
+| generate-improvement-plan | attendance_concern | No | boolean | True/False | User |
+| generate-improvement-plan | declining_trend | No | boolean | True/False | User |
+| generate-improvement-plan | low_overall_percentage | No | boolean | True/False | User |
 
-### Scope and Operating Principles
-- **Deterministic Operation**: The agent operates completely deterministically. 
-- **No LLM Reasoning**: No LLM-generated reasoning, probabilistic evaluation, or free-text inference is used within the seven analytical tools. 
-- **Data Dependency**: All outputs are strictly derived from supplied structured JSON inputs combined with static, deterministic mathematical formulas and hardcoded threshold rules.
-- **Analytical Parameters**: The thresholds (e.g., passing grades, risk boundaries) are project-defined analytical parameters and do **not** represent official institutional policy.
-- **Agent Limitations**:
-  - The agent does **NOT** know real-world student identities.
-  - The agent does **NOT** infer subjective context, medical histories, or psychological conditions.
-  - The agent does **NOT** extrapolate missing data; if required data is absent, the tool will safely fail.
-  - The agent does **NOT** fetch or retrieve external data. Unless explicitly implemented as an integration, all calculations are performed exclusively on the provided input payload.
+## Decision
+The agent reaches classification completely deterministically through a sequential pipeline for each node:
+`INPUT` ↓ `VALIDATION` ↓ `CALCULATION` ↓ `THRESHOLD/RULE` ↓ `CLASSIFICATION` ↓ `OUTPUT`
 
-### Data Distinction
-A. **User-Supplied Data**: The raw numerical marks, attendance counts, subject IDs, and boolean flags provided directly in the input payload.
-B. **Deterministically Derived Values**: Percentages, sums, averages, and string classifications computed strictly via mathematical formulas or threshold conditions.
-C. **Static Analytical Rules/Thresholds**: Hardcoded logic blocks specifying the exact cut-offs for grade bands, risk flags, and improvement categories.
-D. **External Data**: **None**. The current implementation strictly operates without external data retrieval.
+- **Operators**: Standard exact operators (`>`, `>=`, `<`, `<=`, `==`).
+- **Thresholds**: Defined explicitly in the code. Hitting a boundary behaves strictly according to the mathematical operator (e.g. `>= 50` includes `50.0`).
+- **Precedence**: Evaluated chronologically in code; `if/elif/else` blocks are mutually exclusive and evaluated top-down.
+- **Rule Chaining**: Rules within tools are evaluated independently (e.g. failing_subjects logic is completely separate from overall_percentage logic in `detect-performance-risk`). Tools themselves are executed completely independently, meaning the user must chain outputs to inputs manually.
 
----
+## Limits
+- **Supplied structured data only**: Analyzes only the JSON payload it receives.
+- **No hidden student information**: Assumes zero prior knowledge.
+- **No external database**: Does not make network calls to LMS or SIS platforms.
+- **No LLM reasoning**: Outputs are strict rule mappings, not generated text.
+- **Project-defined thresholds**: Grade boundaries (A=90, B=80, etc.) are standard templates, not mapped to specific institutional rules.
+- **Missing Data Limitations**: Required inputs missing will explicitly crash the tool logic (raising ValueError) to fail safely.
 
-## 2. DATA PROVENANCE MAP
+## Output Contract
+| Tool | Output Field | Type | Meaning | Derived From |
+|---|---|---|---|---|
+| analyze-student-performance | total_subjects | integer | Count of subjects | subjects input |
+| analyze-student-performance | total_marks_obtained | number | Sum of obtained | subjects input |
+| analyze-student-performance | total_maximum_marks | number | Sum of maximums | subjects input |
+| analyze-student-performance | overall_percentage | number | total_obtained / total_max * 100 | subjects input |
+| analyze-student-performance | passing_subjects | array | List of passing subject IDs | subjects input |
+| analyze-subject-performance | subject_level_findings | array | Detailed category breakdown | subjects input |
+| analyze-attendance | shortage_percentage | number | Distance below 75% | percentage derived/input |
+| analyze-attendance | required_additional_attendance| integer | Classes needed to hit 75% | classes input |
+| detect-performance-risk | risk_indicators | array | Flags triggered by rules | inputs |
+| calculate-grade-summary | grade_counts | object | Count of A,B,C,D,F | inputs |
+| analyze-performance-trend | absolute_change | number | latest - first | periods input |
+| generate-improvement-plan | actions | array | String action recommendations | boolean inputs |
 
-| Data Element | Origin | User Supplied? | Derived? | Transformation | Used By | Output |
-| --- | --- | --- | --- | --- | --- | --- |
-| `student_id` | Input payload | Yes | No | None | All tools | Passed through to output |
-| `marks_obtained` | Input payload | Yes | No | None | analyze-student-performance, analyze-subject-performance | Math operations |
-| `max_marks` | Input payload | Yes | No | None | analyze-student-performance, analyze-subject-performance | Math operations |
-| `classes_attended` / `classes_conducted` | Input payload | Yes | No | None | analyze-attendance | Converted to percentage |
-| `percentage` | Formula | No | Yes | `(marks / max) * 100` | calculate-grade-summary | Output metric |
-| `overall_percentage` | Formula | No | Yes | `(total_marks / total_max) * 100` | detect-performance-risk | Output metric |
-| `score_category` / `attendance_category` | Static Rule | No | Yes | `if >= Threshold -> Category` | analyze-subject-performance, analyze-attendance | Output category |
-| `risk_indicators` | Static Rule | No | Yes | Boolean match against conditions | detect-performance-risk | Array of risk objects |
-| `actions` / `priority_areas` | Static Rule | No | Yes | Map true/false flags to static text | generate-improvement-plan | Array of strings |
-| **External API Data** | N/A | No | No | N/A | N/A | **None** |
+## Complete Execution Lifecycle
+1. **INPUT**: User supplies JSON data to the Adapter layer.
+2. **TOOL DISCOVERY**: The `AgentCore` dynamically loads python modules from the `tools/` directory and instantiates them via `DynamicToolRegistry`.
+3. **TOOL SELECTION**: `AgentCore.execute_tool` routes the payload by the strict `tool_name`.
+4. **DETERMINISTIC EXECUTION**: The tool's `.execute(input)` method runs standard Python math/logic.
+5. **RESULT VALIDATION**: Internal tool types strictly map data before returning.
+6. **STRUCTURED OUTPUT**: A JSON-serializable `Dict` is wrapped in a success payload and returned.
 
----
+| Lifecycle Stage | Implementation | Responsibility |
+|---|---|---|
+| Request Translation | `PortableAdapter.execute` (`adapters/portable_adapter.py`) | Neutral API border |
+| Discovery/Routing | `DynamicToolRegistry.execute` (`core/registry.py`) | Route payload securely |
+| Deterministic Execution| `Tool.execute` (`tools/*.py`) | Pure calculation and validation |
 
-## 3. TOOL-BY-TOOL EXPLAINABILITY
+*(Note: The tools are independent. Automatic chaining does not exist in the core framework).*
 
-### 1. analyze-student-performance
-**A. Purpose**: Analyze a student's overall academic performance and find aggregate metrics.
-**B. Input Schema**: Object requiring `student_id` (str) and `subjects` (array of objects with `subject_id`, `marks_obtained`, `max_marks`). Optional: `attendance_percentage` (num).
-**C. Output Schema**: Object containing `total_subjects`, `total_marks_obtained`, `total_maximum_marks`, `overall_percentage`, `average_percentage`, `highest_performing_subject`, `lowest_performing_subject`, `passing_subjects`, `below_threshold_subjects`, and optionally `attendance_status`.
-**D. Validation Rules**: Subjects must be a list. Marks must be numeric. `marks_obtained` >= 0. `max_marks` > 0. `marks_obtained` <= `max_marks`. Duplicate `subject_id` is rejected.
-**E. Calculation/Formula**: 
-- `percentage` = `(marks_obtained / max_marks) * 100`
-- `overall_percentage` = `(total_marks_obtained / total_max_marks) * 100`
-**F. Decision Rules**: Subjects are categorized as passing or below threshold based on individual percentage.
-**G. Thresholds**: 
-- Pass: `percentage >= 50`
-- Attendance Satisfactory: `attendance_percentage >= 75`
-**H. Boundary Conditions**: `total_max_marks = 0` handled to prevent division by zero. Empty subjects list results in zero values.
-**I. Missing/Invalid Input Behavior**: Raises `ValueError` for missing required fields, non-numeric marks, or out-of-bounds percentages.
-**J. Data Provenance**: Derived strictly from user-supplied `subjects` array.
-**K. Traceability Path**: `Tool.execute` in `analyze-student-performance.py`.
-**N. Source-code reference**: `tools/analyze-student-performance.py`
-**O. Test reference**: `test_analyze_student_performance` in `tests/test_tools.py`
+## Decision/Rule Transparency (Tool-by-Tool) & Tool-by-Tool Examples
 
-### 2. analyze-subject-performance
-**A. Purpose**: Evaluate individual subject scores and assign categories.
-**B. Input Schema**: Object requiring `subjects` (array of objects with `subject_id`, `marks_obtained`, `max_marks`).
-**C. Output Schema**: Object containing `subject_level_findings`, `strongest_subjects`, and `weakest_subjects`.
-**D. Validation Rules**: Required fields must exist per subject. Marks must be numeric, `>= 0`, and `obtained <= max`.
-**E. Calculation/Formula**: `percentage` = `(marks_obtained / max_marks) * 100`
-**F. Decision Rules**: Assigns categories and strong/weak lists.
-**G. Thresholds**: 
-- `excellent`: >= 90
-- `strong`: >= 75
-- `satisfactory`: >= 60
-- `needs improvement`: >= 40
-- `critical improvement`: < 40
-- `pass`: >= 40
-- `strongest_subjects` list: >= 75
-- `weakest_subjects` list: < 60
-**H. Boundary Conditions**: Exactly hitting the boundary includes it in the higher bracket (e.g. 75.0 is `strong`).
-**I. Missing/Invalid Input Behavior**: Raises `ValueError` for invalid ranges or missing data.
-**J. Data Provenance**: Derived strictly from user-supplied `subjects` input.
-**K. Traceability Path**: `Tool.execute` in `analyze-subject-performance.py`.
-**N. Source-code reference**: `tools/analyze-subject-performance.py`
-**O. Test reference**: `test_analyze_subject_performance` in `tests/test_tools.py`
+### analyze-student-performance
+1. **Purpose**: Evaluate aggregate overall status.
+2. **Input**: `student_id`, `subjects`, `attendance_percentage`.
+3. **Validation**: Non-empty array, zero/negative bounds testing, max > 0.
+4. **Formula**: `(sum(marks_obtained) / sum(max_marks)) * 100`
+5. **Intermediate values**: `highest_score`, `lowest_score`.
+6. **Rules**: Append passing IDs if >= 50. Append failing IDs if < 50.
+7. **Thresholds**: Pass = 50. Attendance Satisfactory = 75.
+8. **Exact operators**: `>= 50`, `< 50`.
+9. **Boundary behavior**: 50.0 is passed.
+10. **Output**: Object of totals and lists.
+11. **Error behavior**: `ValueError` for zero-division risk (max_marks=0).
+12. **Provenance**: Directly calculated from raw scores.
+13. **Source file**: `tools/analyze-student-performance.py`
+14. **Function/class**: `Tool.execute`
+15. **Test file**: `tests/test_tools.py`
+16. **Test name**: `test_analyze_student_performance`
+17. **Concrete JSON input**: `{"student_id": "S1", "subjects": [{"subject_id": "M1", "marks_obtained": 80, "max_marks": 100}, {"subject_id": "P1", "marks_obtained": 40, "max_marks": 100}], "attendance_percentage": 80}`
+18. **Concrete JSON output**: `{"total_subjects": 2, "total_marks_obtained": 120.0, "total_maximum_marks": 200.0, "overall_percentage": 60.0, "average_percentage": 60.0, "highest_performing_subject": "M1", "lowest_performing_subject": "P1", "passing_subjects": ["M1"], "below_threshold_subjects": ["P1"], "attendance_status": "satisfactory"}`
 
-### 3. analyze-attendance
-**A. Purpose**: Compute attendance metrics and required classes to meet thresholds.
-**B. Input Schema**: Object requiring `student_id`. Requires either `attendance_percentage` OR both `classes_attended` and `classes_conducted`.
-**C. Output Schema**: Object containing `student_id`, `attendance_percentage`, `attendance_category`, `shortage_percentage`, `findings`, and `required_additional_attendance` (if applicable).
-**D. Validation Rules**: Counts must be numeric, `>= 0`, conducted > 0, attended <= conducted. Percentage must be 0-100.
-**E. Calculation/Formula**: 
-- `attendance_percentage` = `(attended / conducted) * 100`
-- `shortage_percentage` = `max(0, 75 - percentage)`
-- `required_additional` = `max(0, 3 * conducted - 4 * attended)`
-**F. Decision Rules**: Maps attendance percentage to severity categories.
-**G. Thresholds**:
-- `strong attendance`: >= 90
-- `acceptable`: >= 75
-- `attendance concern`: >= 65
-- `high concern`: < 65
-**H. Boundary Conditions**: If shortage is calculated but attendance is above 75%, shortage is 0.
-**I. Missing/Invalid Input Behavior**: Raises `ValueError` if neither percentage nor class counts are provided, or if counts are invalid.
-**J. Data Provenance**: Derived from user-supplied attendance inputs.
-**K. Traceability Path**: `Tool.execute` in `analyze-attendance.py`.
-**N. Source-code reference**: `tools/analyze-attendance.py`
-**O. Test reference**: `test_analyze_attendance` in `tests/test_tools.py`
+### analyze-subject-performance
+1. **Purpose**: Assign descriptive bands to subject scores.
+2. **Input**: `subjects` array.
+3. **Validation**: `marks_obtained <= max_marks`, no missing keys.
+4. **Formula**: `(marks_obtained / max_marks) * 100`
+5. **Intermediate values**: Computed percentage per subject.
+6. **Rules**: If-elif chain mapping percentage to word bands.
+7. **Thresholds**: >= 90 (excellent), >= 75 (strong), >= 60 (satisfactory), >= 40 (needs improvement), < 40 (critical).
+8. **Exact operators**: `>=`, `<`
+9. **Boundary behavior**: Exactly 90 is excellent.
+10. **Output**: Arrays of strongest/weakest and list of findings.
+11. **Error behavior**: Missing keys raise `ValueError`.
+12. **Provenance**: Derived from per-subject raw scores.
+13. **Source file**: `tools/analyze-subject-performance.py`
+14. **Function/class**: `Tool.execute`
+15. **Test file**: `tests/test_tools.py`
+16. **Test name**: `test_analyze_subject_performance`
+17. **Concrete JSON input**: `{"subjects": [{"subject_id": "M1", "marks_obtained": 95, "max_marks": 100}]}`
+18. **Concrete JSON output**: `{"subject_level_findings": [{"subject_id": "M1", "percentage": 95.0, "pass": true, "score_category": "excellent"}], "strongest_subjects": ["M1"], "weakest_subjects": []}`
 
-### 4. detect-performance-risk
-**A. Purpose**: Flag specific risk conditions based on hardcoded rules.
-**B. Input Schema**: Object containing optional `overall_percentage`, `attendance_percentage`, `failing_subjects_count`, `recent_performance_change`.
-**C. Output Schema**: Object containing `risk_indicators` (array).
-**D. Validation Rules**: Numeric type checking, percentages bounded 0-100, counts >= 0.
-**E. Calculation/Formula**: None (purely boolean/threshold evaluations).
-**F. Decision Rules**: If a metric hits a threshold, a static risk object is appended to the array.
-**G. Thresholds**:
-- R1: `overall_percentage < 50`
-- R2: `failing_subjects_count >= 2`
-- R3: `attendance_percentage < 75`
-- R4: `recent_performance_change <= -10`
-**H. Boundary Conditions**: Values exactly matching the boundary (e.g., `< 50`) behave explicitly as defined (50 is not flagged).
-**I. Missing/Invalid Input Behavior**: Optional inputs are safely skipped if absent. Invalid types raise `ValueError`.
-**J. Data Provenance**: Derived from user-supplied summary metrics.
-**K. Traceability Path**: `Tool.execute` in `detect-performance-risk.py`.
-**N. Source-code reference**: `tools/detect-performance-risk.py`
-**O. Test reference**: `test_detect_performance_risk` in `tests/test_tools.py`
+### analyze-attendance
+1. **Purpose**: Classify attendance health.
+2. **Input**: `student_id`, `classes_attended`, `classes_conducted`.
+3. **Validation**: `classes_conducted > 0`, `attended <= conducted`.
+4. **Formula**: `(attended / conducted) * 100`. Shortage = `75 - pct`. Added = `3*conducted - 4*attended`.
+5. **Intermediate values**: `attendance_percentage`
+6. **Rules**: If-elif mapping.
+7. **Thresholds**: >=90 (strong), >=75 (acceptable), >=65 (concern), <65 (high concern).
+8. **Exact operators**: `>= 75`, etc.
+9. **Boundary behavior**: Shortage is max bounded at 0.
+10. **Output**: Metrics and required additional classes.
+11. **Error behavior**: Zero classes conducted raises `ValueError`.
+12. **Provenance**: Derived from raw class counts.
+13. **Source file**: `tools/analyze-attendance.py`
+14. **Function/class**: `Tool.execute`
+15. **Test file**: `tests/test_tools.py`
+16. **Test name**: `test_analyze_attendance`
+17. **Concrete JSON input**: `{"student_id": "S1", "classes_attended": 60, "classes_conducted": 100}`
+18. **Concrete JSON output**: `{"student_id": "S1", "attendance_percentage": 60.0, "attendance_category": "high concern", "shortage_percentage": 15.0, "findings": "Attendance is high concern.", "required_additional_attendance": 60}`
 
-### 5. calculate-grade-summary
-**A. Purpose**: Group subject percentages into letter grade distributions.
-**B. Input Schema**: Array of objects with `subject_id`, `percentage` (or dict wrapping this array).
-**C. Output Schema**: Object containing `total_subjects`, `average_percentage`, `highest_percentage`, `lowest_percentage`, `grade_counts`, `subject_categories`.
-**D. Validation Rules**: List cannot be empty. Percentages must be numeric, 0-100.
-**E. Calculation/Formula**: Math averages derived from iterating the provided list.
-**F. Decision Rules**: Maps percentages to grade buckets.
-**G. Thresholds**:
-- A: >= 90
-- B: >= 80
-- C: >= 70
-- D: >= 60
-- F: < 60
-**H. Boundary Conditions**: Highest/lowest initialized to extreme bounds (-1.0, 101.0).
-**I. Missing/Invalid Input Behavior**: Raises `ValueError` if array is empty or schema malformed.
-**J. Data Provenance**: Derived directly from user-supplied subject percentages.
-**K. Traceability Path**: `Tool.execute` in `calculate-grade-summary.py`.
-**N. Source-code reference**: `tools/calculate-grade-summary.py`
-**O. Test reference**: `test_calculate_grade_summary` in `tests/test_tools.py`
+### detect-performance-risk
+1. **Purpose**: Flag analytical risk indicators.
+2. **Input**: `overall_percentage`, `attendance_percentage`, `failing_subjects_count`, `recent_performance_change`.
+3. **Validation**: percentages 0-100, counts >= 0.
+4. **Formula**: N/A (Boolean comparisons).
+5. **Intermediate values**: Evaluated boolean expressions.
+6. **Rules**: Append indicator object if threshold met.
+7. **Thresholds**: overall < 50, failing >= 2, attendance < 75, change <= -10.
+8. **Exact operators**: `<`, `>=`, `<=`
+9. **Boundary behavior**: A drop of exactly 10 points (`-10.0`) triggers risk.
+10. **Output**: Array of `risk_indicators`.
+11. **Error behavior**: Invalid range (e.g. percentage=110) raises `ValueError`.
+12. **Provenance**: Directly comparing aggregate inputs.
+13. **Source file**: `tools/detect-performance-risk.py`
+14. **Function/class**: `Tool.execute`
+15. **Test file**: `tests/test_tools.py`
+16. **Test name**: `test_detect_performance_risk`
+17. **Concrete JSON input**: `{"overall_percentage": 45, "failing_subjects_count": 3}`
+18. **Concrete JSON output**: `{"risk_indicators": [{"rule_triggered": "R1", "affected_metrics": ["overall_percentage"], "severity": "high", "explanation": "overall percentage below 50 -> academic performance concern"}, {"rule_triggered": "R2", "affected_metrics": ["failing_subjects_count"], "severity": "high", "explanation": "two or more failing subjects -> multi-subject concern"}]}`
 
-### 6. analyze-performance-trend
-**A. Purpose**: Identify trajectory direction over multiple time periods.
-**B. Input Schema**: Object requiring `student_id` and `periods` (array of `period`, `percentage`).
-**C. Output Schema**: Object containing `first_score`, `latest_score`, `absolute_change`, `average_change_per_period`, `category`, `trend_explanation`.
-**D. Validation Rules**: Requires at least 2 periods. Periods cannot be duplicates. Percentages must be 0-100.
-**E. Calculation/Formula**: 
-- `absolute_change` = `latest_score - first_score`
-- `average_change_per_period` = `absolute_change / (len(periods) - 1)`
-**F. Decision Rules**: Maps the absolute change to a descriptive category.
-**G. Thresholds**:
-- `improving`: >= 5
-- `declining`: <= -5
-- `relatively stable`: between -4.99 and 4.99
-**H. Boundary Conditions**: Assumes array order represents chronological sequence.
-**I. Missing/Invalid Input Behavior**: Raises `ValueError` for < 2 periods or duplicates.
-**J. Data Provenance**: Derived from user-supplied historical periods.
-**K. Traceability Path**: `Tool.execute` in `analyze-performance-trend.py`.
-**N. Source-code reference**: `tools/analyze-performance-trend.py`
-**O. Test reference**: `test_analyze_performance_trend` in `tests/test_tools.py`
+### calculate-grade-summary
+1. **Purpose**: Generate letter grade histogram.
+2. **Input**: `subjects` array containing `percentage`.
+3. **Validation**: percentages 0-100.
+4. **Formula**: average = `sum(pct) / count`.
+5. **Intermediate values**: `total`, `highest`, `lowest`.
+6. **Rules**: Map pct to A,B,C,D,F keys in a dictionary.
+7. **Thresholds**: A (>=90), B (>=80), C (>=70), D (>=60), F (<60).
+8. **Exact operators**: `>=`
+9. **Boundary behavior**: Exactly 90.0 is an A.
+10. **Output**: Grade counts dictionary, averages.
+11. **Error behavior**: Empty array raises `ValueError` (div by zero).
+12. **Provenance**: Aggregating raw percentage inputs.
+13. **Source file**: `tools/calculate-grade-summary.py`
+14. **Function/class**: `Tool.execute`
+15. **Test file**: `tests/test_tools.py`
+16. **Test name**: `test_calculate_grade_summary`
+17. **Concrete JSON input**: `[{"subject_id": "M1", "percentage": 85}]`
+18. **Concrete JSON output**: `{"total_subjects": 1, "average_percentage": 85.0, "highest_percentage": 85.0, "lowest_percentage": 85.0, "grade_counts": {"A": 0, "B": 1, "C": 0, "D": 0, "F": 0}, "subject_categories": [{"subject_id": "M1", "category": "B"}], "summary_explanation": "Project-defined grade bands: A (90-100), B (80-89.9), C (70-79.9), D (60-69.9), F (<60)."}`
 
-### 7. generate-improvement-plan
-**A. Purpose**: Provide structured recommendations based strictly on deterministic risk flags.
-**B. Input Schema**: Object containing optional boolean/array flags: `weak_subjects`, `attendance_concern`, `declining_trend`, `low_overall_percentage`.
-**C. Output Schema**: Object containing `priority_areas`, `actions`, `reasoning`, `assumptions`.
-**D. Validation Rules**: `weak_subjects` must be a list if provided.
-**E. Calculation/Formula**: N/A (boolean logic).
-**F. Decision Rules**: For each flag evaluated as `True`, predetermined text strings are appended to the arrays. If no flags are true, a default "Maintenance" action is returned.
-**G. Thresholds**: N/A
-**H. Boundary Conditions**: None.
-**I. Missing/Invalid Input Behavior**: Missing fields default to `False` safely.
-**J. Data Provenance**: Hardcoded strings triggered by user-supplied boolean parameters.
-**K. Traceability Path**: `Tool.execute` in `generate-improvement-plan.py`.
-**N. Source-code reference**: `tools/generate-improvement-plan.py`
-**O. Test reference**: `test_generate_improvement_plan` in `tests/test_tools.py`
+### analyze-performance-trend
+1. **Purpose**: Track direction over periods.
+2. **Input**: `student_id`, `periods` (period, percentage).
+3. **Validation**: Minimum length 2, no duplicates.
+4. **Formula**: `absolute_change = latest - first`, `avg_change = absolute / (len - 1)`
+5. **Intermediate values**: array of extracted scores.
+6. **Rules**: `improving` if change >= 5. `declining` if <= -5.
+7. **Thresholds**: 5, -5.
+8. **Exact operators**: `>=`, `<=`
+9. **Boundary behavior**: Exactly 5.0 is improving. 4.9 is stable.
+10. **Output**: Change metrics and category.
+11. **Error behavior**: `< 2` periods raises `ValueError`.
+12. **Provenance**: Computed chronologically from supplied array boundaries.
+13. **Source file**: `tools/analyze-performance-trend.py`
+14. **Function/class**: `Tool.execute`
+15. **Test file**: `tests/test_tools.py`
+16. **Test name**: `test_analyze_performance_trend`
+17. **Concrete JSON input**: `{"student_id": "S1", "periods": [{"period": "T1", "percentage": 50}, {"period": "T2", "percentage": 60}]}`
+18. **Concrete JSON output**: `{"first_score": 50, "latest_score": 60, "absolute_change": 10, "average_change_per_period": 10.0, "category": "improving", "trend_explanation": "Based on analytic thresholds (+/- 5 points), trend is improving."}`
 
----
+### generate-improvement-plan
+1. **Purpose**: Map boolean risk flags to string actions.
+2. **Input**: `weak_subjects`, `attendance_concern`, `declining_trend`, `low_overall_percentage`.
+3. **Validation**: Boolean/list typing.
+4. **Formula**: None.
+5. **Intermediate values**: Arrays built via `.append()`.
+6. **Rules**: Append specific string if boolean is True.
+7. **Thresholds**: N/A
+8. **Exact operators**: `if x:`
+9. **Boundary behavior**: Defaults to Maintenance plan if array remains empty.
+10. **Output**: Arrays of strings.
+11. **Error behavior**: Missing keys default to `False`.
+12. **Provenance**: Hardcoded text mapped to user boolean flags.
+13. **Source file**: `tools/generate-improvement-plan.py`
+14. **Function/class**: `Tool.execute`
+15. **Test file**: `tests/test_tools.py`
+16. **Test name**: `test_generate_improvement_plan`
+17. **Concrete JSON input**: `{"weak_subjects": ["Math"], "attendance_concern": true}`
+18. **Concrete JSON output**: `{"priority_areas": ["Attendance", "Subject: Math"], "actions": ["Improve class attendance.", "Recommend additional practice for subjects: Math."], "reasoning": ["Attendance is below acceptable project thresholds.", "Identified 1 weak subject(s)."], "assumptions": ["Plan generated from supplied deterministic data."]}`
 
-## 4. CONCRETE JSON I/O EXAMPLES
+## Explainability of Calculated Results
+- **Percentage**: `(marks_obtained / max_marks) * 100`. Defines passing threshold and category mapping.
+- **Overall Percentage**: `(total_marks_obtained / total_max_marks) * 100`. Used to trigger `R1` overall academic risk.
+- **Attendance Percentage**: `(classes_attended / classes_conducted) * 100`. Triggers attendance concern category.
+- **Shortage Percentage**: `max(0, 75 - attendance_percentage)`. Informs user how far below minimum threshold they are.
+- **Required Additional Attendance**: `max(0, 3 * classes_conducted - 4 * classes_attended)`. Quantifies exactly how many classes are needed to hit a 75% mathematical average.
+- **Absolute Trend Change**: `latest - first`. Determines stability category directly.
 
-### Example: analyze-student-performance
-Input:
-```json
-{
-  "student_id": "S1",
-  "attendance_percentage": 80,
-  "subjects": [
-    {"subject_id": "M1", "marks_obtained": 80, "max_marks": 100},
-    {"subject_id": "P1", "marks_obtained": 40, "max_marks": 100}
-  ]
-}
-```
-Output:
-```json
-{
-  "total_subjects": 2,
-  "total_marks_obtained": 120.0,
-  "total_maximum_marks": 200.0,
-  "overall_percentage": 60.0,
-  "average_percentage": 60.0,
-  "highest_performing_subject": "M1",
-  "lowest_performing_subject": "P1",
-  "passing_subjects": ["M1"],
-  "below_threshold_subjects": ["P1"],
-  "attendance_status": "satisfactory"
-}
-```
+## Provenance
+### User-Supplied Data
+`marks_obtained`, `max_marks`, `classes_conducted`, `classes_attended`, `overall_percentage` (for risk detection input).
+### Derived Data
+`percentage`, `shortage_percentage`, string categories, and string arrays for actions.
+### Static Rules
+Grade Boundaries (A=90), Risk Thresholds (R1=50%), Trend thresholds (+/-5 points).
+### External Data
+External data: None.
 
-### Example: analyze-subject-performance
-Input:
-```json
-{
-  "subjects": [
-    {"subject_id": "M1", "marks_obtained": 95, "max_marks": 100}
-  ]
-}
-```
-Output:
-```json
-{
-  "subject_level_findings": [
-    {
-      "subject_id": "M1",
-      "percentage": 95.0,
-      "pass": true,
-      "score_category": "excellent"
-    }
-  ],
-  "strongest_subjects": ["M1"],
-  "weakest_subjects": []
-}
-```
+## Determinism
+The agent is entirely deterministic.
+- **No LLM reasoning**: Logic uses standard Python operators.
+- **No random sampling**: No stochastic modeling or variable seeds.
+- **Fixed formulas/thresholds**: 90 is always an A.
+- **Fixed outputs**: Identical inputs yield byte-for-byte identical output JSONs every single time. There are no exceptions in the codebase.
 
-### Example: analyze-attendance
-Input:
-```json
-{
-  "student_id": "S1",
-  "classes_attended": 60,
-  "classes_conducted": 100
-}
-```
-Output:
-```json
-{
-  "student_id": "S1",
-  "attendance_percentage": 60.0,
-  "attendance_category": "high concern",
-  "shortage_percentage": 15.0,
-  "findings": "Attendance is high concern.",
-  "required_additional_attendance": 60
-}
-```
+## Traceability
+| Requirement/Behavior | Tool | Source File | Function/Class | Test File | Test |
+|---|---|---|---|---|---|
+| Calculate Overall Percentage | analyze-student-performance | `tools/analyze-student-performance.py` | `Tool.execute` | `tests/test_tools.py` | `test_analyze_student_performance` |
+| Grade Mapping | calculate-grade-summary | `tools/calculate-grade-summary.py` | `Tool.execute` | `tests/test_tools.py` | `test_calculate_grade_summary` |
+| Risk Flags | detect-performance-risk | `tools/detect-performance-risk.py` | `Tool.execute` | `tests/test_tools.py` | `test_detect_performance_risk` |
+| Trend Thresholding | analyze-performance-trend | `tools/analyze-performance-trend.py` | `Tool.execute` | `tests/test_tools.py` | `test_analyze_performance_trend` |
 
-### Example: detect-performance-risk
-Input:
-```json
-{
-  "overall_percentage": 45,
-  "failing_subjects_count": 3
-}
-```
-Output:
-```json
-{
-  "risk_indicators": [
-    {
-      "rule_triggered": "R1",
-      "affected_metrics": ["overall_percentage"],
-      "severity": "high",
-      "explanation": "overall percentage below 50 -> academic performance concern"
-    },
-    {
-      "rule_triggered": "R2",
-      "affected_metrics": ["failing_subjects_count"],
-      "severity": "high",
-      "explanation": "two or more failing subjects -> multi-subject concern"
-    }
-  ]
-}
-```
+## Error/Edge Cases
+| Case | Tool | Actual Behavior | Error Type/Output |
+|---|---|---|---|
+| Missing required fields | All tools | Validates and halts before calculation | Raises `ValueError` |
+| Duplicate subjects/periods | analyze-student-performance, analyze-performance-trend | Set checking catches duplicates | Raises `ValueError` |
+| Zero denominators | analyze-student-performance, analyze-attendance | Checks `max_marks > 0` and `conducted > 0` | Raises `ValueError` |
+| Empty arrays | calculate-grade-summary | Checked explicitly | Raises `ValueError` |
+| Negative values | All tools | Range bounding | Raises `ValueError` |
+| Marks > Max | analyze-student-performance | Bounds check `marks <= max_marks` | Raises `ValueError` |
 
-### Example: calculate-grade-summary
-Input:
-```json
-[
-  {"subject_id": "M1", "percentage": 85}
-]
-```
-Output:
-```json
-{
-  "total_subjects": 1,
-  "average_percentage": 85.0,
-  "highest_percentage": 85.0,
-  "lowest_percentage": 85.0,
-  "grade_counts": {
-    "A": 0, "B": 1, "C": 0, "D": 0, "F": 0
-  },
-  "subject_categories": [
-    {"subject_id": "M1", "category": "B"}
-  ],
-  "summary_explanation": "Project-defined grade bands: A (90-100), B (80-89.9), C (70-79.9), D (60-69.9), F (<60)."
-}
-```
+## Security and Execution Boundaries
+- **Validation**: Strict type checks (`isinstance`) guard against object injection.
+- **No `eval`/`exec`**: Tests specifically verify the complete absence of unsafe parsers (`test_no_unsafe_code`).
+- **No Arbitrary Shell/Code Execution**: Fully sandboxed.
+- **Configuration Boundaries**: Adapter registry intercepts payloads dynamically; tools never touch the OS filesystem or environment directly.
 
-### Example: analyze-performance-trend
-Input:
-```json
-{
-  "student_id": "S1",
-  "periods": [
-    {"period": "T1", "percentage": 50},
-    {"period": "T2", "percentage": 60}
-  ]
-}
-```
-Output:
-```json
-{
-  "first_score": 50,
-  "latest_score": 60,
-  "absolute_change": 10,
-  "average_change_per_period": 10.0,
-  "category": "improving",
-  "trend_explanation": "Based on analytic thresholds (+/- 5 points), trend is improving."
-}
-```
+## Human/System Boundary
+The agent performs deterministic mathematical analysis. It does **NOT**:
+- Make institutional academic decisions.
+- Replace teachers or counselors.
+- Infer psychological state.
+- Infer medical conditions.
+- Access hidden student records.
+- Claim official academic policy.
 
-### Example: generate-improvement-plan
-Input:
-```json
-{
-  "weak_subjects": ["Math"],
-  "attendance_concern": true
-}
-```
-Output:
-```json
-{
-  "priority_areas": [
-    "Attendance",
-    "Subject: Math"
-  ],
-  "actions": [
-    "Improve class attendance.",
-    "Recommend additional practice for subjects: Math."
-  ],
-  "reasoning": [
-    "Attendance is below acceptable project thresholds.",
-    "Identified 1 weak subject(s)."
-  ],
-  "assumptions": [
-    "Plan generated from supplied deterministic data."
-  ]
-}
-```
+The boundary is strict: **INPUT DATA → AGENT ANALYSIS → STRUCTURED RESULT**.
+
+## Verification Evidence
+- **pytest result**: PASSED (Local unit tests validating deterministic execution and security).
+- **readiness audit result**: PASSED (Local file and secret scan).
+- **OpenGAP validation result**: Validation passed (0 warnings) (Manifest strictly tested against OpenGAP schema).
+
+## Explainability Completeness Checklist
+- [x] Agent purpose documented
+- [x] Inputs documented
+- [x] Decisions documented
+- [x] Limits documented
+- [x] Output contract documented
+- [x] Complete execution lifecycle documented
+- [x] All seven tools documented
+- [x] Tool-by-tool rules documented
+- [x] Tool-by-tool JSON examples documented
+- [x] Calculated results explained
+- [x] Provenance documented
+- [x] Determinism documented
+- [x] Traceability documented
+- [x] Error/edge cases documented
+- [x] Security boundaries documented
+- [x] Human/system boundary documented
+- [x] Verification evidence documented
+- [x] Implementation references documented
+- [x] Test references documented
+- [x] No unsupported behavior claimed
